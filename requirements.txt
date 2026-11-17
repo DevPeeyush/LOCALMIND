@@ -1,0 +1,38 @@
+# ==========================================
+# Offline AI Assistant - Dependencies
+# ==========================================
+
+# Backend
+fastapi
+uvicorn[standard]
+python-multipart
+httpx
+
+# Frontend
+streamlit
+plotly
+
+# Local LLM
+ollama
+
+# Data Validation and Configuration
+pydantic
+pydantic-settings
+
+# Document Processing
+pymupdf
+
+# RAG and Vector Database
+faiss-cpu
+numpy
+
+# Data Analysis and Benchmarking
+pandas
+scikit-learn
+psutil
+
+# Retry Mechanism
+tenacity
+
+# Environment Variables
+python-dotenv

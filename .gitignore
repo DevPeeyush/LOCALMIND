@@ -1,0 +1,29 @@
+
+.venv/
+__pycache__/
+*.py[cod]
+.env
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local databases and runtime files
+*.db
+*.sqlite
+*.sqlite3
+
+# Editor and operating-system files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+data/documents/*
+data/processed/*
+data/vector_store/*
+!data/documents/.gitkeep
+!data/processed/.gitkeep
+!data/vector_store/.gitkeep
+
+logs/*
+!logs/.gitkeep
