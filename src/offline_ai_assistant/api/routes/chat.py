@@ -1,6 +1,9 @@
 
 """Chat API routes."""
+import json
 
+from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import StreamingResponse
 from fastapi import APIRouter, HTTPException, Request
 from offline_ai_assistant.api.schemas.chat import (
     ConversationCreateRequest,
@@ -14,7 +17,6 @@ from offline_ai_assistant.api.schemas.chat import (
     ChatHistoryResponse,
     ResetConversationResponse,
 )
-
 
 router = APIRouter(
     prefix="/api/v1",
@@ -71,6 +73,7 @@ def send_chat_message(
         result = session_manager.send_message(
             conversation_id=conversation_id,
             user_message=payload.message,
+            model_name=payload.model_name,
         )
 
         return result
@@ -80,6 +83,7 @@ def send_chat_message(
             status_code=404,
             detail=str(error),
         ) from error
+        
 
     except RuntimeError as error:
         raise HTTPException(
@@ -87,6 +91,62 @@ def send_chat_message(
             detail=str(error),
         ) from error
 
+@router.post("/chat/stream", summary="Stream a chat response")
+def stream_chat_message(payload: ChatRequest, request: Request):
+    """
+    Stream the assistant response as newline-delimited JSON events.
+
+    Event types:
+    - start: conversation has started
+    - token: contains a generated text chunk
+    - done: contains the completed response and metadata
+    - error: contains an error message
+    """
+
+    session_manager = get_session_manager(request)
+
+    # Create a conversation if one was not provided.
+    if payload.conversation_id is None:
+        conversation = session_manager.create_conversation()
+        conversation_id = conversation["id"]
+    else:
+        conversation_id = payload.conversation_id
+
+    def event_stream():
+        try:
+            # Notify the frontend that streaming has started.
+            yield json.dumps(
+                {
+                    "type": "start",
+                    "conversation_id": conversation_id,
+                },
+                ensure_ascii=False,
+            ) + "\n"
+
+            # Stream response chunks from SessionManager.
+            for event in session_manager.stream_message(
+                conversation_id=conversation_id,
+                user_message=payload.message,
+                model_name=payload.model_name,
+            ):
+                yield json.dumps(
+                    event,
+                    ensure_ascii=False,
+                ) + "\n"
+
+        except Exception as error:
+            yield json.dumps(
+                {
+                    "type": "error",
+                    "detail": str(error),
+                },
+                ensure_ascii=False,
+            ) + "\n"
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="application/x-ndjson",
+    )
 
 @router.get(
     "/chat/{conversation_id}/history",

@@ -2,11 +2,13 @@
 import re
 from typing import Any, Dict, List, Tuple
 
+from httpx2 import query
 from langchain_core.documents import Document
 
+from offline_ai_assistant.rag import retriever
 from offline_ai_assistant.rag.retriever import Retriever
 from offline_ai_assistant.core.llm import llm
-
+from offline_ai_assistant.config import settings
 
 class RAGPipeline:
     """
@@ -103,13 +105,17 @@ STRICT RULES:
         self,
         retriever: Retriever,
         llm_client: Any = None,
-    ):
+        model_manager: Any = None,
+    ):  
         self.retriever = retriever
+    
         self.llm = (
             llm_client
             if llm_client is not None
             else llm
         )
+    
+        self.model_manager = model_manager
 
     def _format_context(
         self,
@@ -341,6 +347,7 @@ Use only the [S1] citation format.
         self,
         query: str,
         k: int = 3,
+        model_name: str | None = None,
     ) -> Dict[str, Any]:
         """Execute the complete source-aware RAG pipeline."""
 
@@ -397,11 +404,32 @@ Use only the [S1] citation format.
             context=context,
         )
 
-        # Step 6: Generate answer using Ollama.
-        answer = self.llm.generate_response(
-            prompt=prompt,
-            system_prompt=self.SYSTEM_PROMPT,
-        )
+        # Step 6: Generate answer using the selected model.
+        generation_metrics = {}
+
+        if hasattr(self, "model_manager") and self.model_manager is not None:
+            generation_result = self.model_manager.generate(
+                messages=[
+                    {
+                        "role": "system",
+                        "content": self.SYSTEM_PROMPT,
+                    },
+                    {
+                        "role": "user",
+                        "content": prompt,
+                    },
+                ],
+                model_name=model_name,
+            )
+
+            answer = generation_result["response"]
+            generation_metrics = generation_result["metrics"]
+
+        else:
+            answer = self.llm.generate_response(
+                prompt=prompt,
+                system_prompt=self.SYSTEM_PROMPT,
+            )
 
         # Exact insurance-detail retrieval deliberately supplies one
         # strongest matching passage. If the model omits its citation,
@@ -439,6 +467,150 @@ Use only the [S1] citation format.
 
         # Step 8: Return the final response.
         return {
+        "question": query,
+        "answer": answer,
+        "sources": [
+            {
+                "source_id": source["source_id"],
+                "file_name": source["file_name"],
+                "page": source["page"],
+            }
+            for source in cited_sources
+        ],
+        "model": model_name or (
+            self.model_manager.default_model
+            if self.model_manager is not None
+            else settings.ollama_model
+        ),
+        "metrics": generation_metrics,
+    }   
+
+    def stream(
+        self,
+        query: str,
+        k: int = 3,
+        model_name: str | None = None,
+    ):
+        """Stream a RAG response while preserving citation validation."""
+
+        if not query or not query.strip():
+            raise ValueError("Query cannot be empty.")
+
+        if k <= 0:
+            raise ValueError("k must be greater than zero.")
+
+        if self.model_manager is None:
+            raise RuntimeError(
+                "RAG streaming requires the configured ModelManager."
+            )
+
+        query = query.strip()
+
+        # Step 1: Determine retrieval size.
+        retrieval_k = k
+
+        if self.retriever.is_broad_benefits_query(query):
+            category_count = len(
+                self.retriever.BENEFIT_CATEGORY_QUERIES
+            )
+            retrieval_k = max(k, category_count)
+
+        # Step 2: Retrieve relevant documents.
+        retrieval_results = self.retriever.retrieve_with_scores(
+            query=query,
+            k=retrieval_k,
+        )
+
+        # Step 3: Handle empty retrieval results.
+        if not retrieval_results:
+            yield {
+                "type": "done",
+                "question": query,
+                "answer": (
+                    "I could not find relevant information "
+                    "in the available Share India policy "
+                    "documents to answer this question."
+                ),
+                "sources": [],
+                "model": model_name or self.model_manager.default_model,
+                "metrics": {},
+            }
+            return
+
+        # Step 4: Format context and build the prompt.
+        context, sources = self._format_context(retrieval_results)
+
+        prompt = self._build_prompt(
+            query=query,
+            context=context,
+        )
+
+        # Step 5: Stream model output.
+        response_parts = []
+
+        messages = [
+            {
+                "role": "system",
+                "content": self.SYSTEM_PROMPT,
+            },
+            {
+                "role": "user",
+                "content": prompt,
+            },
+        ]
+
+        selected_model = model_name or self.model_manager.default_model
+
+        for chunk in self.model_manager.generate_stream(
+            messages=messages,
+            model_name=selected_model,
+        ):
+            response_parts.append(chunk)
+
+            yield {
+                "type": "token",
+                "content": chunk,
+            }
+
+        answer = "".join(response_parts)
+
+        if not answer.strip():
+            raise RuntimeError("The model returned an empty response.")
+
+        # Step 6: Apply the existing insurance-detail safeguard.
+        is_exact_insurance_detail = (
+            hasattr(self.retriever, "_is_exact_insurance_detail_query")
+            and self.retriever._is_exact_insurance_detail_query(query)
+        )
+
+        normalized_answer = self._normalize_citations(answer)
+
+        valid_source_ids = {
+            source["source_id"] for source in sources
+        }
+
+        has_valid_citation = any(
+            source_id in valid_source_ids
+            for source_id in self.CITATION_PATTERN.findall(
+                normalized_answer
+            )
+        )
+
+        if is_exact_insurance_detail and not has_valid_citation:
+            answer = (
+                "The retrieved policy information does not specify "
+                "the requested individual insurance detail. [S1]"
+            )
+
+        # Step 7: Validate and normalize citations.
+        answer, cited_sources = self._filter_cited_sources(
+            answer=answer,
+            sources=sources,
+        )
+
+        # Step 8: Send the final normalized response.
+        yield {
+            "type": "done",
             "question": query,
             "answer": answer,
             "sources": [
@@ -449,4 +621,6 @@ Use only the [S1] citation format.
                 }
                 for source in cited_sources
             ],
+            "model": selected_model,
+            "metrics": {},
         }

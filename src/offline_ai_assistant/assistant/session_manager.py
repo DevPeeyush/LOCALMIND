@@ -82,11 +82,12 @@ class SessionManager:
         rag_pipeline=None,
         max_messages: int = 20,
         system_prompt: str | None = None,
+        model_manager=None,
     ):
         self.store = store or ConversationStore()
 
         self.rag_pipeline = rag_pipeline
-
+        self.model_manager = model_manager
         self.max_messages = max_messages
         self.system_prompt = system_prompt
 
@@ -101,7 +102,8 @@ class SessionManager:
         """Create a fresh general-purpose chat engine."""
 
         engine = ChatEngine(
-            system_prompt=self.system_prompt
+            system_prompt=self.system_prompt,
+            model_manager=self.model_manager,
         )
 
         engine.memory.max_messages = self.max_messages
@@ -271,25 +273,25 @@ class SessionManager:
     # CHAT OPERATIONS
     # --------------------------------------------------
 
+    
     def send_message(
         self,
         conversation_id: str,
         user_message: str,
+        model_name: str | None = None,
     ) -> dict:
         """Route, generate and persist a chat response."""
-
+    
         if not user_message or not user_message.strip():
             raise ValueError("Message cannot be empty.")
-
+    
         user_message = user_message.strip()
-
-        conversation = self.store.get_conversation(
-            conversation_id
-        )
-
+    
+        conversation = self.store.get_conversation(conversation_id)
+    
         if conversation is None:
             raise ValueError("Conversation does not exist.")
-
+    
         if (
             self.rag_pipeline is None
             and self._is_policy_question(user_message)
@@ -298,60 +300,78 @@ class SessionManager:
                 "RAG pipeline is not configured. "
                 "Cannot process policy-related questions."
             )
-
+    
+        # Validate selected model when model manager is available.
+        if self.model_manager is not None and model_name is not None:
+            self.model_manager.validate_model(model_name)
+    
         engine = self._get_engine(conversation_id)
-
-        previous_messages = self.store.get_messages(
-            conversation_id
-        )
-
+    
+        previous_messages = self.store.get_messages(conversation_id)
+    
         mode, effective_query = self._resolve_message_mode(
             user_message,
             engine.get_history(),
         )
-
+    
+        # Default to the configured chat model.
+        selected_model = (
+            model_name
+            or (
+                self.model_manager.default_model
+                if self.model_manager is not None
+                else None
+            )
+        )
+    
+        # Initialize generation information.
+        sources = []
+        metrics = {}
+    
         # ----------------------------------------------
-        # Generate response using the selected engine.
+        # RAG generation
         # ----------------------------------------------
-
+    
         if mode == "rag":
-
-            if self.rag_pipeline is None:
-                raise RuntimeError(
-                    "RAG pipeline is unavailable."
+        
+            if self.model_manager is not None:
+                rag_result = self.rag_pipeline.run(
+                    effective_query,
+                    model_name=selected_model,
                 )
-
-            rag_result = self.rag_pipeline.run(
-                effective_query
-            )
-
+            else:
+                rag_result = self.rag_pipeline.run(
+                    effective_query
+                )
+    
             response = rag_result["answer"]
-
             sources = rag_result.get("sources", [])
-
+            metrics = rag_result.get("metrics", {})
+            selected_model = rag_result.get("model", selected_model)
+    
             # Update in-memory conversation history.
-            engine.memory.add_message(
-                "user",
-                user_message,
-            )
-
-            engine.memory.add_message(
-                "assistant",
-                response,
-            )
-
+            engine.memory.add_message("user", user_message)
+            engine.memory.add_message("assistant", response)
+    
+        # ----------------------------------------------
+        # General chat generation
+        # ----------------------------------------------
+    
         else:
-
-            response = engine.send_message(
-                user_message
+        
+            generation_result = engine.send_message_with_metrics(
+                user_message,
+                model_name=selected_model,
             )
-
-            sources = []
-
+    
+            response = generation_result["response"]
+            selected_model = generation_result["model"]
+            metrics = generation_result["metrics"]
+    
         # ----------------------------------------------
-        # Persist the completed exchange.
+        # Persist completed exchange
         # ----------------------------------------------
-
+    
         try:
             self.store.add_messages(
                 conversation_id,
@@ -366,10 +386,154 @@ class SessionManager:
                     },
                 ],
             )
+    
+            # Generate title from first user message.
+            if not previous_messages:
+            
+                title = user_message.replace("\n", " ")
+    
+                if len(title) > 50:
+                    title = title[:47].rstrip() + "..."
+    
+                self.store.rename_conversation(
+                    conversation_id,
+                    title,
+                )
+    
+        except Exception as error:
+        
+            self._engines.pop(conversation_id, None)
+    
+            raise RuntimeError(
+                f"Failed to persist conversation: {error}"
+            ) from error
+    
+        return {
+            "conversation_id": conversation_id,
+            "mode": mode,
+            "question": user_message,
+            "response": response,
+            "sources": sources,
+            "model": selected_model,
+            "metrics": metrics,
+            "messages": engine.get_history(),
+        }
+
+
+    def stream_message(
+        self,
+        conversation_id: str,
+        user_message: str,
+        model_name: str | None = None,
+    ):
+        """Stream a response through RAG or general chat and persist it."""
+
+        if not user_message or not user_message.strip():
+            raise ValueError("Message cannot be empty.")
+
+        user_message = user_message.strip()
+
+        conversation = self.store.get_conversation(conversation_id)
+
+        if conversation is None:
+            raise ValueError("Conversation does not exist.")
+
+        if self.model_manager is None:
+            raise RuntimeError("ModelManager is not configured.")
+
+        if model_name is not None:
+            self.model_manager.validate_model(model_name)
+
+        engine = self._get_engine(conversation_id)
+        previous_messages = self.store.get_messages(conversation_id)
+
+        mode, effective_query = self._resolve_message_mode(
+            user_message,
+            engine.get_history(),
+        )
+
+        selected_model = model_name or self.model_manager.default_model
+        response_parts = []
+        sources = []
+        metrics = {}
+
+        try:
+            if mode == "rag":
+                if self.rag_pipeline is None:
+                    raise RuntimeError(
+                        "RAG pipeline is not configured. "
+                        "Cannot process policy-related questions."
+                    )
+
+                final_result = None
+
+                for event in self.rag_pipeline.stream(
+                    query=effective_query,
+                    model_name=selected_model,
+                ):
+                    if event.get("type") == "token":
+                        chunk = event.get("content", "")
+                        if chunk:
+                            response_parts.append(chunk)
+                            yield {
+                                "type": "token",
+                                "content": chunk,
+                            }
+
+                    elif event.get("type") == "done":
+                        final_result = event
+
+                if final_result is None:
+                    raise RuntimeError(
+                        "RAG streaming ended without a final result."
+                    )
+
+                # Use the final citation-validated answer rather than the
+                # raw streamed text, which may contain unvalidated citations.
+                response = final_result.get(
+                    "answer",
+                    "".join(response_parts),
+                )
+                sources = final_result.get("sources", [])
+                metrics = final_result.get("metrics", {})
+                selected_model = final_result.get(
+                    "model",
+                    selected_model,
+                )
+
+                # Keep the in-memory history aligned with the final answer.
+                engine.memory.add_message("user", user_message)
+                engine.memory.add_message("assistant", response)
+
+            else:
+                for chunk in engine.stream_message(
+                    user_message=user_message,
+                    model_name=selected_model,
+                ):
+                    response_parts.append(chunk)
+                    yield {
+                        "type": "token",
+                        "content": chunk,
+                    }
+
+                response = "".join(response_parts)
+
+                if not response.strip():
+                    raise RuntimeError(
+                        "The model returned an empty response."
+                    )
+
+            # Persist the completed exchange.
+            self.store.add_messages(
+                conversation_id,
+                [
+                    {"role": "user", "content": user_message},
+                    {"role": "assistant", "content": response},
+                ],
+            )
 
             # Generate a title from the first user message.
             if not previous_messages:
-
                 title = user_message.replace("\n", " ")
 
                 if len(title) > 50:
@@ -380,22 +544,23 @@ class SessionManager:
                     title,
                 )
 
+            yield {
+                "type": "done",
+                "conversation_id": conversation_id,
+                "mode": mode,
+                "question": user_message,
+                "response": response,
+                "sources": sources,
+                "model": selected_model,
+                "metrics": metrics,
+                "messages": engine.get_history(),
+            }
+
         except Exception as error:
-
             self._engines.pop(conversation_id, None)
-
             raise RuntimeError(
-                f"Failed to persist conversation: {error}"
+                f"Session streaming failed: {error}"
             ) from error
-
-        return {
-            "conversation_id": conversation_id,
-            "mode": mode,
-            "question": user_message,
-            "response": response,
-            "sources": sources,
-            "messages": engine.get_history(),
-        }
 
     # --------------------------------------------------
     # HISTORY AND RESET

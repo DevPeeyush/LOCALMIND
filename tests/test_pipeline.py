@@ -56,19 +56,20 @@ def test_rag_pipeline():
         print(f"\nSource ID: {source['source_id']}")
         print(f"Document: {source['file_name']}")
         print(f"Page: {source['page']}")
-        print(f"Distance: {source['distance_score']:.4f}")
-        print(f"Path: {source['source_path']}")
 
     # 10. Validate response
-    assert result["query"] == query
+    assert result["question"] == query
     assert isinstance(result["answer"], str)
     assert result["answer"].strip()
+    assert isinstance(result["sources"], list)
     assert len(result["sources"]) > 0
 
+    # Validate the actual public source response structure
     for source in result["sources"]:
+        assert source["source_id"]
+        assert source["source_id"].startswith("S")
         assert source["file_name"]
-        assert source["source_path"]
-        assert source["distance_score"] is not None
+        assert "page" in source
 
     print("\nSource-aware RAG test successful!")
 

@@ -1,7 +1,7 @@
 
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from unittest.mock import patch
+from unittest.mock import Mock
 
 from offline_ai_assistant.assistant.conversation_store import (
     ConversationStore,
@@ -19,7 +19,25 @@ def test_session_manager():
 
         store = ConversationStore(db_path=db_path)
 
-        manager = SessionManager(store=store)
+        # Mock RAG pipeline because this test uses a policy question.
+        mock_rag_pipeline = Mock()
+
+        mock_rag_pipeline.run.return_value = {
+            "question": "What employee benefits does Share India provide?",
+            "answer": "Share India provides employee benefits. [S1]",
+            "sources": [
+                {
+                    "source_id": "S1",
+                    "file_name": "employee_benefits.pdf",
+                    "page": 1,
+                }
+            ],
+        }
+
+        manager = SessionManager(
+            store=store,
+            rag_pipeline=mock_rag_pipeline,
+        )
 
         # 1. Create first conversation
         conversation1 = manager.create_conversation()
@@ -28,17 +46,20 @@ def test_session_manager():
 
         print("\nConversation 1:", id1)
 
-        # 2. Generate a response using mocked Ollama
-        with patch(
-            "offline_ai_assistant.assistant.chat.llm.generate_chat_response",
-            return_value="Share India provides employee benefits."
-        ):
-            result = manager.send_message(
-                id1,
-                "What employee benefits does Share India provide?"
-            )
+        # 2. Generate a response through the mocked RAG pipeline
+        result = manager.send_message(
+            id1,
+            "What employee benefits does Share India provide?",
+        )
 
         print("\nAI Response:", result["response"])
+
+        assert result["mode"] == "rag"
+        assert result["response"] == (
+            "Share India provides employee benefits. [S1]"
+        )
+
+        mock_rag_pipeline.run.assert_called_once()
 
         # 3. Verify automatic title generation
         conversation = store.get_conversation(id1)

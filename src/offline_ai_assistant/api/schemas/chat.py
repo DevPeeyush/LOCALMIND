@@ -16,6 +16,10 @@ class ChatRequest(BaseModel):
         default=None,
         description="Existing conversation ID. Omit to create a new conversation.",
     )
+    model_name: str | None = Field(
+        default=None,
+        description="Selected local chat model. Uses default model if omitted.",
+    )
 
     @field_validator("message")
     @classmethod
@@ -49,7 +53,11 @@ class ChatResponse(BaseModel):
     question: str
 
     response: str
+    model: str | None = None
 
+    metrics: dict[str, Any] = Field(
+        default_factory=dict
+    )
     sources: list[dict[str, Any]] = Field(
         default_factory=list
     )

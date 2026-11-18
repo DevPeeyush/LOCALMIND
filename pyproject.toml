@@ -38,7 +38,7 @@ dependencies = [
 ]
 
 [project.scripts]
-offline-ai-assistant = "offline_ai_assistant:main"
+offline-ai-assistant = "offline_ai_assistant.main:main"
 
 [build-system]
 requires = ["uv_build>=0.13.6,<0.14.0"]

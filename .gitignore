@@ -27,3 +27,23 @@ data/vector_store/*
 
 logs/*
 !logs/.gitkeep
+
+# Frontend dependencies and build output
+**/node_modules/
+**/build/
+**/coverage/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Generated benchmark output and runtime reports
+data/benchmark_reports/
+src/data/benchmark_reports/
+
+# Python build artifacts
+dist/
+*.egg-info/
+
+.agent/
+.aws/
+.codex/

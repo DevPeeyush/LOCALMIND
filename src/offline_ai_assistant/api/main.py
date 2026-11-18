@@ -2,7 +2,7 @@
 """FastAPI application entry point."""
 
 from contextlib import asynccontextmanager
-
+from offline_ai_assistant.api.routes.models import router as models_router
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from offline_ai_assistant.api.routes.documents import (
@@ -14,6 +14,9 @@ from offline_ai_assistant.api.dependencies import (
 
 from offline_ai_assistant.api.routes.chat import (
     router as chat_router,
+)
+from offline_ai_assistant.api.routes.benchmark import (
+    router as benchmark_router,
 )
 
 
@@ -53,6 +56,8 @@ app.add_middleware(
     allow_origins=[
         "http://localhost:8501",
         "http://127.0.0.1:8501",
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -63,7 +68,8 @@ app.add_middleware(
 # Register API routes.
 app.include_router(chat_router)
 app.include_router(documents_router)
-
+app.include_router(models_router)
+app.include_router(benchmark_router)
 
 @app.get("/")
 def root():
